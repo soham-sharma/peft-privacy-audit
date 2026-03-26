@@ -1,0 +1,9 @@
+# Virtual environment
+mia_env/
+
+# Data, models and results\
+data/
+models/
+results/
+log.txt
+training_log.txt
