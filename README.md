@@ -1,19 +1,16 @@
-# cs593-tml — Membership Inference Attack Experiments
+# cs593-TML — Does Parameter-Efficient Fine-Tuning Protect Privacy?
 
-Short description
 - This repository contains code and data for membership inference attack (MIA) experiments used in the CS593 project.
 
 Quick project overview
 - Data: `data/` holds training/eval splits and evaluation logs.
 - Models: `models/` stores trained model artifacts.
 - Env: `mia_env/` is a Python virtual environment for reproducible runs.
-- Results / logs: `results/`, `log.txt`, and `training_log.txt`.
+- Results: `results/`.
 
 Quick start
-1. Activate the provided virtualenv: `source mia_env/bin/activate`
-2. Prepare data: `python prepare_data.py`
-3. Run baseline training: `python train_baseline.py`
-4. Run MIA: `python run_mia.py`
-
-Notes
-- This README is an initial project comment. Update it with experiment details, requirements, and reproduction steps.
+1. Setup the environment `bash setup.sh`
+2. Activate the virtualenv: `source mia_env/bin/activate`
+3. Prepare data: `python prepare_data.py`
+4. Run baseline training: `python train_baseline.py`
+5. Run MIA: `python run_mia.py`
