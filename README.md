@@ -12,5 +12,12 @@ Quick start
 1. Setup the environment `bash setup.sh`
 2. Activate the virtualenv: `source mia_env/bin/activate`
 3. Prepare data: `python prepare_data.py`
-4. Run baseline training: `python train_baseline.py`
-5. Run MIA: `python run_mia.py`
+4. Run training (examples):
+	- Full FT baseline: `python train_baseline.py --method full_ft`
+	- LoRA rank 4: `python train_baseline.py --method lora --lora-rank 4`
+	- LoRA rank 16: `python train_baseline.py --method lora --lora-rank 16`
+	- LoRA rank 64: `python train_baseline.py --method lora --lora-rank 64`
+	- Prefix tuning: `python train_baseline.py --method prefix --prefix-virtual-tokens 20`
+5. Run MIA across all discovered models: `python run_mia.py`
+6. Or run MIA for specific models:
+	- `python run_mia.py --model-dirs ./models/full_ft ./models/lora_r4 ./models/lora_r16 ./models/lora_r64 ./models/prefix_v20`
