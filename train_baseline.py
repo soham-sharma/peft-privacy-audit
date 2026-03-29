@@ -18,7 +18,11 @@ Output (in ./models/full_ft/):
     training_log.txt                       - loss per epoch
 """
 
+import argparse
+import json
+import math
 import os
+import subprocess
 import time
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -33,8 +37,7 @@ from tqdm import tqdm
 # ── Configuration ────────────────────────────────────────────
 MODEL_NAME   = "gpt2-medium"    # 355M parameter GPT-2 variant
 DATA_PATH    = "./data/train.txt"
-OUTPUT_DIR   = "./models/full_ft"
-LOG_PATH     = "./models/full_ft/training_log.txt"
+OUTPUT_ROOT  = "./models"
 
 # Training hyperparameters
 MAX_LENGTH   = 256      # token length per sample (shorter = faster training)
@@ -45,6 +48,23 @@ LR           = 2e-5     # standard LR for GPT-2 fine-tuning
 WARMUP_RATIO = 0.1      # 10% of steps used for LR warmup
 SEED         = 42
 # ─────────────────────────────────────────────────────────────
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train GPT-2 with full FT, LoRA, or Prefix tuning")
+    parser.add_argument("--method", choices=["full_ft", "lora", "prefix"], default="full_ft")
+    parser.add_argument("--model-name", type=str, default=MODEL_NAME)
+    parser.add_argument("--data-path", type=str, default=DATA_PATH)
+    parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--epochs", type=int, default=EPOCHS)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--grad-accum", type=int, default=GRAD_ACCUM)
+    parser.add_argument("--lr", type=float, default=LR)
+    parser.add_argument("--max-length", type=int, default=MAX_LENGTH)
+    parser.add_argument("--warmup-ratio", type=float, default=WARMUP_RATIO)
+    parser.add_argument("--seed", type=int, default=SEED)
+    return parser.parse_args()
+
+args = parse_args()
 
 torch.manual_seed(SEED)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
