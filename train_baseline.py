@@ -68,10 +68,22 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=SEED)
     return parser.parse_args()
 
+def resolve_output_dir(args):
+    if args.output_dir:
+        return args.output_dir
+    if args.method == "full_ft":
+        return os.path.join(OUTPUT_ROOT, "full_ft")
+    if args.method == "lora":
+        return os.path.join(OUTPUT_ROOT, f"lora_r{args.lora_rank}")
+    return os.path.join(OUTPUT_ROOT, f"prefix_v{args.prefix_virtual_tokens}")
+
 args = parse_args()
+output_dir = resolve_output_dir(args)
+log_path = os.path.join(output_dir, "training_log.txt")
+meta_path = os.path.join(output_dir, "run_metadata.json")
 
 torch.manual_seed(SEED)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(output_dir, exist_ok=True)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 if device.type == "cuda":
@@ -206,17 +218,17 @@ for epoch in range(1, EPOCHS + 1):
 
 # ── Save model ────────────────────────────────────────────────
 print("\n" + "=" * 50)
-print(f" Saving model to {OUTPUT_DIR}/")
+print(f" Saving model to {output_dir}/")
 print("=" * 50)
 
-model.save_pretrained(OUTPUT_DIR)
-tokenizer.save_pretrained(OUTPUT_DIR)
+model.save_pretrained(output_dir)
+tokenizer.save_pretrained(output_dir)
 
-with open(LOG_PATH, "w") as f:
+with open(log_path, "w", encoding="utf-8") as f:
     f.writelines(log_lines)
 
 total_time = (time.time() - start_time) / 60
 print(f"\nTraining complete in {total_time:.1f} minutes.")
-print(f"Model saved to    : {OUTPUT_DIR}/")
-print(f"Training log      : {LOG_PATH}")
+print(f"Model saved to    : {output_dir}/")
+print(f"Training log      : {log_path}")
 print("\nNext: run run_mia.py")
