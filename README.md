@@ -1,4 +1,4 @@
-# cs593-TML — Does Parameter-Efficient Fine-Tuning Protect Privacy?
+# CS593-TML — Does Parameter-Efficient Fine-Tuning Protect Privacy?
 
 - This repository contains code and data for membership inference attack (MIA) experiments used in the CS593 project.
 
@@ -14,9 +14,7 @@ Quick start
 3. Prepare data: `python prepare_data.py`
 4. Run training (examples):
 	- Full FT baseline: `python train_baseline.py --method full_ft`
-	- LoRA rank 4: `python train_baseline.py --method lora --lora-rank 4`
-	- LoRA rank 16: `python train_baseline.py --method lora --lora-rank 16`
-	- LoRA rank 64: `python train_baseline.py --method lora --lora-rank 64`
+	- LoRA: `python train_baseline.py --method lora --lora-rank` 
 	- Prefix tuning: `python train_baseline.py --method prefix --prefix-virtual-tokens 20`
 5. Run MIA across all discovered models: `python run_mia.py`
 6. Or run MIA for specific models:
