@@ -52,6 +52,10 @@ SEED         = 42
 def parse_args():
     parser = argparse.ArgumentParser(description="Train GPT-2 with full FT, LoRA, or Prefix tuning")
     parser.add_argument("--method", choices=["full_ft", "lora", "prefix"], default="full_ft")
+    parser.add_argument("--lora-rank", type=int, default=16)
+    parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument("--lora-dropout", type=float, default=0.05)
+    parser.add_argument("--prefix-virtual-tokens", type=int, default=20)
     parser.add_argument("--model-name", type=str, default=MODEL_NAME)
     parser.add_argument("--data-path", type=str, default=DATA_PATH)
     parser.add_argument("--output-dir", type=str, default=None)
