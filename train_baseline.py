@@ -266,8 +266,40 @@ tokenizer.save_pretrained(output_dir)
 with open(log_path, "w", encoding="utf-8") as f:
     f.writelines(log_lines)
 
+metadata = {
+    "method": args.method,
+    "model_name": args.model_name,
+    "data_path": args.data_path,
+    "output_dir": output_dir,
+    "max_length": args.max_length,
+    "batch_size": args.batch_size,
+    "grad_accum": args.grad_accum,
+    "epochs": args.epochs,
+    "lr": args.lr,
+    "warmup_ratio": args.warmup_ratio,
+    "seed": args.seed,
+    "total_params": total_params,
+    "trainable_params": trainable_params,
+    "trainable_pct": trainable_pct,
+    "runtime_min": (time.time() - start_time) / 60,
+    "device": str(device),
+    "gpu_name": torch.cuda.get_device_name(0) if device.type == "cuda" else None,
+    "git_commit": get_git_commit_hash(),
+}
+if args.method == "lora":
+    metadata.update({
+        "lora_rank": args.lora_rank,
+        "lora_alpha": args.lora_alpha,
+        "lora_dropout": args.lora_dropout,
+    })
+if args.method == "prefix":
+    metadata.update({"prefix_virtual_tokens": args.prefix_virtual_tokens})
+
+with open(meta_path, "w", encoding="utf-8") as f:
+    json.dump(metadata, f, indent=2)
+
 total_time = (time.time() - start_time) / 60
 print(f"\nTraining complete in {total_time:.1f} minutes.")
 print(f"Model saved to    : {output_dir}/")
 print(f"Training log      : {log_path}")
-print("\nNext: run run_mia.py")
+print(f"Run metadata      : {meta_path}")
