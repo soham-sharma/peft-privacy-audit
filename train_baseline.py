@@ -82,7 +82,10 @@ output_dir = resolve_output_dir(args)
 log_path = os.path.join(output_dir, "training_log.txt")
 meta_path = os.path.join(output_dir, "run_metadata.json")
 
-torch.manual_seed(SEED)
+torch.manual_seed(args.seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(args.seed)
+
 os.makedirs(output_dir, exist_ok=True)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -127,15 +130,15 @@ class TextDataset(Dataset):
 
 # ── Load tokenizer & model ────────────────────────────────────
 print("\n" + "=" * 50)
-print(f" Loading {MODEL_NAME}...")
+print(f" Loading {args.model_name}...")
 print("=" * 50)
 print("(First run will download ~1.5 GB from HuggingFace)")
 
-tokenizer = GPT2TokenizerFast.from_pretrained(MODEL_NAME)
+tokenizer = GPT2TokenizerFast.from_pretrained(args.model_name)
 # GPT-2 has no pad token by default — use EOS as pad
 tokenizer.pad_token = tokenizer.eos_token
 
-model = GPT2LMHeadModel.from_pretrained(MODEL_NAME)
+model = GPT2LMHeadModel.from_pretrained(args.model_name)
 model.config.pad_token_id = tokenizer.eos_token_id
 model.to(device)
 
@@ -145,20 +148,21 @@ print(f"\nModel parameters   : {total_params / 1e6:.1f}M total")
 print(f"Trainable params   : {trainable_params / 1e6:.1f}M (100% — full fine-tuning)")
 
 # ── Build dataset & dataloader ────────────────────────────────
-dataset    = TextDataset(DATA_PATH, tokenizer, MAX_LENGTH)
+dataset    = TextDataset(args.data_path, tokenizer, args.max_length)
 dataloader = DataLoader(
     dataset,
-    batch_size=BATCH_SIZE,
+    batch_size=args.batch_size,
     shuffle=True,
     num_workers=0,      # keep 0 for WSL compatibility
     pin_memory=True if device.type == "cuda" else False,
 )
 
 # ── Optimizer & scheduler ─────────────────────────────────────
-optimizer = AdamW(model.parameters(), lr=LR, weight_decay=0.01)
+optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
 
-total_steps   = (len(dataloader) // GRAD_ACCUM) * EPOCHS
-warmup_steps  = int(total_steps * WARMUP_RATIO)
+updates_per_epoch = max(1, math.ceil(len(dataloader) / args.grad_accum))
+total_steps   = updates_per_epoch * args.epochs
+warmup_steps  = int(total_steps * args.warmup_ratio)
 
 scheduler = get_linear_schedule_with_warmup(
     optimizer,
@@ -167,9 +171,9 @@ scheduler = get_linear_schedule_with_warmup(
 )
 
 print(f"\nTraining plan:")
-print(f"  Epochs          : {EPOCHS}")
+print(f"  Epochs          : {args.epochs}")
 print(f"  Batches/epoch   : {len(dataloader)}")
-print(f"  Effective batch : {BATCH_SIZE * GRAD_ACCUM}")
+print(f"  Effective batch : {args.batch_size * args.grad_accum}")
 print(f"  Total steps     : {total_steps}")
 print(f"  Warmup steps    : {warmup_steps}")
 
@@ -181,26 +185,26 @@ print("=" * 50)
 log_lines = ["epoch,step,loss,elapsed_min\n"]
 start_time = time.time()
 
-for epoch in range(1, EPOCHS + 1):
+for epoch in range(1, args.epochs + 1):
     model.train()
     epoch_loss  = 0.0
     step_count  = 0
     optimizer.zero_grad()
 
-    pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{EPOCHS}")
+    pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{args.epochs}")
     for batch_idx, batch in enumerate(pbar):
         input_ids = batch["input_ids"].to(device)
         labels    = batch["labels"].to(device)
 
         outputs = model(input_ids=input_ids, labels=labels)
-        loss    = outputs.loss / GRAD_ACCUM   # normalize for gradient accumulation
+        loss    = outputs.loss / args.grad_accum   # normalize for gradient accumulation
         loss.backward()
 
         epoch_loss += outputs.loss.item()
         step_count += 1
 
-        # Gradient accumulation: only step every GRAD_ACCUM batches
-        if (batch_idx + 1) % GRAD_ACCUM == 0:
+        # Gradient accumulation: only step every args.grad_accum batches
+        if (batch_idx + 1) % args.grad_accum == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             scheduler.step()
