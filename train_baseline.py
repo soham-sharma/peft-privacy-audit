@@ -32,6 +32,7 @@ from transformers import (
     AdamW,
     get_linear_schedule_with_warmup,
 )
+from peft import LoraConfig, PrefixTuningConfig, TaskType, get_peft_model
 from tqdm import tqdm
 
 # ── Configuration ────────────────────────────────────────────
@@ -140,12 +141,36 @@ tokenizer.pad_token = tokenizer.eos_token
 
 model = GPT2LMHeadModel.from_pretrained(args.model_name)
 model.config.pad_token_id = tokenizer.eos_token_id
+
+if args.method == "lora":
+    lora_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        target_modules=["c_attn", "c_proj"],
+        bias="none",
+    )
+    model = get_peft_model(model, lora_config)
+elif args.method == "prefix":
+    prefix_config = PrefixTuningConfig(
+        task_type=TaskType.CAUSAL_LM,
+        num_virtual_tokens=args.prefix_virtual_tokens,
+    )
+    model = get_peft_model(model, prefix_config)
+
 model.to(device)
 
 total_params = sum(p.numel() for p in model.parameters())
 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+trainable_pct = 100.0 * trainable_params / total_params
 print(f"\nModel parameters   : {total_params / 1e6:.1f}M total")
-print(f"Trainable params   : {trainable_params / 1e6:.1f}M (100% — full fine-tuning)")
+print(f"Trainable params   : {trainable_params / 1e6:.3f}M ({trainable_pct:.3f}%)")
+print(f"Method             : {args.method}")
+if args.method == "lora":
+    print(f"LoRA rank          : {args.lora_rank}")
+if args.method == "prefix":
+    print(f"Prefix tokens      : {args.prefix_virtual_tokens}")
 
 # ── Build dataset & dataloader ────────────────────────────────
 dataset    = TextDataset(args.data_path, tokenizer, args.max_length)
