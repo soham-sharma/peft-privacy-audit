@@ -94,6 +94,16 @@ if device.type == "cuda":
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
+def get_git_commit_hash():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
+
 # ── Dataset class ─────────────────────────────────────────────
 class TextDataset(Dataset):
     """Simple line-by-line text dataset with tokenization."""
