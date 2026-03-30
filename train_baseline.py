@@ -1,21 +1,15 @@
 """
-STEP 3: Train Baseline (Full Fine-Tuning on GPT-2 Medium)
-==========================================================
-Fine-tunes GPT-2 Medium on the PubMed training set.
-This is the "full fine-tuning" baseline — all weights updated.
-We'll compare LoRA variants against this in the final project.
+Trains GPT-2 Medium on the PubMed training set with configurable regimes.
 
-Estimated time: ~30–60 min on a single GPU (varies by VRAM)
-GPU memory needed: ~6 GB (GPT-2 Medium is 355M params)
+Supported methods:
+    - full_ft: full fine-tuning (all weights trainable)
+    - lora: LoRA adapters on attention projections
+    - prefix: Prefix tuning with virtual prompt tokens
 
-Usage:
+Usage examples:
     python train_baseline.py
-
-Output (in ./models/full_ft/):
-    pytorch_model.bin / model.safetensors  - model weights
-    config.json                            - model config
-    tokenizer files                        - for inference
-    training_log.txt                       - loss per epoch
+    python train_baseline.py --method lora --lora-rank 16
+    python train_baseline.py --method prefix --prefix-virtual-tokens 30
 """
 
 import argparse
@@ -69,6 +63,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=SEED)
     return parser.parse_args()
 
+
 def resolve_output_dir(args):
     if args.output_dir:
         return args.output_dir
@@ -77,6 +72,7 @@ def resolve_output_dir(args):
     if args.method == "lora":
         return os.path.join(OUTPUT_ROOT, f"lora_r{args.lora_rank}")
     return os.path.join(OUTPUT_ROOT, f"prefix_v{args.prefix_virtual_tokens}")
+
 
 args = parse_args()
 output_dir = resolve_output_dir(args)
@@ -93,6 +89,7 @@ print(f"Using device: {device}")
 if device.type == "cuda":
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+
 
 def get_git_commit_hash():
     try:
