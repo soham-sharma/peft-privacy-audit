@@ -228,8 +228,8 @@ for epoch in range(1, args.epochs + 1):
         epoch_loss += outputs.loss.item()
         step_count += 1
 
-        # Gradient accumulation: only step every args.grad_accum batches
-        if (batch_idx + 1) % args.grad_accum == 0:
+        # Gradient accumulation: step every grad_accum batches and on final remainder.
+        if (batch_idx + 1) % args.grad_accum == 0 or (batch_idx + 1) == len(dataloader):
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             scheduler.step()
