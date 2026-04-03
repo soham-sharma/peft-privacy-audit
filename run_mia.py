@@ -52,8 +52,8 @@ model.eval()
 model.to(device)
 print("  Model loaded.")
 
-# ── Compute per-sample loss ───────────────────────────────────
-def compute_losses(text_path, label):
+# ── Utility Functions ─────────────────────────────────────────
+def compute_losses(model, tokenizer, text_path, label, max_length, device):
     """
     For each text sample, compute the average per-token cross-entropy loss.
     Lower loss = model is more 'familiar' with the text = likely member.
@@ -68,7 +68,7 @@ def compute_losses(text_path, label):
                 text,
                 return_tensors="pt",
                 truncation=True,
-                max_length=MAX_LENGTH,
+                max_length=max_length,
                 padding=False,
             )
             input_ids = enc["input_ids"].to(device)
@@ -83,9 +83,18 @@ def compute_losses(text_path, label):
 
     return np.array(losses)
 
+
+def tpr_at_fpr(fpr_arr, tpr_arr, target_fpr):
+    """Find the TPR at the closest FPR ≤ target_fpr."""
+    mask = fpr_arr <= target_fpr
+    if not mask.any():
+        return 0.0
+    return tpr_arr[mask][-1]
+
+# ── Compute per-sample loss ───────────────────────────────────
 print("\n[2/4] Computing per-sample losses...")
-member_losses     = compute_losses(MEMBER_PATH,    "members")
-nonmember_losses  = compute_losses(NONMEMBER_PATH, "non-members")
+member_losses     = compute_losses(model, tokenizer, MEMBER_PATH, "members", MAX_LENGTH, device)
+nonmember_losses  = compute_losses(model, tokenizer, NONMEMBER_PATH, "non-members", MAX_LENGTH, device)
 
 print(f"\n  Member losses     — mean: {member_losses.mean():.4f}, std: {member_losses.std():.4f}")
 print(f"  Non-member losses — mean: {nonmember_losses.mean():.4f}, std: {nonmember_losses.std():.4f}")
@@ -111,13 +120,6 @@ fpr, tpr, thresholds = roc_curve(y_true, y_score)
 roc_auc = auc(fpr, tpr)
 
 # TPR at specific low FPR thresholds (key privacy metrics)
-def tpr_at_fpr(fpr_arr, tpr_arr, target_fpr):
-    """Find the TPR at the closest FPR ≤ target_fpr."""
-    mask = fpr_arr <= target_fpr
-    if not mask.any():
-        return 0.0
-    return tpr_arr[mask][-1]
-
 tpr_at_1  = tpr_at_fpr(fpr, tpr, 0.01)
 tpr_at_5  = tpr_at_fpr(fpr, tpr, 0.05)
 tpr_at_10 = tpr_at_fpr(fpr, tpr, 0.10)
@@ -125,7 +127,7 @@ tpr_at_10 = tpr_at_fpr(fpr, tpr, 0.10)
 print(f"\n  ┌─────────────────────────────────────┐")
 print(f"  │   MIA Results (Full Fine-Tuning)    │")
 print(f"  ├─────────────────────────────────────┤")
-print(f"  │  AUC-ROC          : {roc_auc:.4f}          │")
+print(f"  │  AUC-ROC         : {roc_auc:.4f}          │")
 print(f"  │  TPR @ 1%  FPR   : {tpr_at_1:.4f}          │")
 print(f"  │  TPR @ 5%  FPR   : {tpr_at_5:.4f}          │")
 print(f"  │  TPR @ 10% FPR   : {tpr_at_10:.4f}          │")

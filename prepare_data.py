@@ -1,6 +1,4 @@
 """
-STEP 2: Data Preparation
-========================
 Downloads a subset of PubMed abstracts from HuggingFace datasets,
 splits into train / member / non-member sets for MIA, and saves to disk.
 
@@ -134,4 +132,3 @@ with open(os.path.join(OUTPUT_DIR, "data_stats.txt"), "w") as f:
 
 print(stats)
 print(f"Files saved to: {OUTPUT_DIR}/")
-print("\nStep 2 complete. Next: run train_baseline.py")
