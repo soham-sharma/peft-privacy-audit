@@ -25,7 +25,6 @@ import torch
 import matplotlib
 matplotlib.use("Agg")   # non-interactive backend (works in WSL)
 import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 from sklearn.metrics import roc_curve, auc
 from tqdm import tqdm
@@ -42,15 +41,6 @@ BATCH_SIZE      = 8
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-
-# ── Load model ────────────────────────────────────────────────
-print("\n[1/4] Loading fine-tuned model...")
-tokenizer = GPT2TokenizerFast.from_pretrained(MODEL_DIR)
-tokenizer.pad_token = tokenizer.eos_token
-model = GPT2LMHeadModel.from_pretrained(MODEL_DIR)
-model.eval()
-model.to(device)
-print("  Model loaded.")
 
 # ── Utility Functions ─────────────────────────────────────────
 def compute_losses(model, tokenizer, text_path, label, max_length, device):
@@ -91,76 +81,112 @@ def tpr_at_fpr(fpr_arr, tpr_arr, target_fpr):
         return 0.0
     return tpr_arr[mask][-1]
 
-# ── Compute per-sample loss ───────────────────────────────────
-print("\n[2/4] Computing per-sample losses...")
-member_losses     = compute_losses(model, tokenizer, MEMBER_PATH, "members", MAX_LENGTH, device)
-nonmember_losses  = compute_losses(model, tokenizer, NONMEMBER_PATH, "non-members", MAX_LENGTH, device)
+# ── Core Evaluation Logic ─────────────────────────────────────
+def evaluate_model(model_dir, member_path, nonmember_path, max_length, device):
+    print(f"\nEvaluating model: {model_dir}")
+    print("[1/3] Loading model...")
+    tokenizer = GPT2TokenizerFast.from_pretrained(model_dir)
+    tokenizer.pad_token = tokenizer.eos_token
+    model = GPT2LMHeadModel.from_pretrained(model_dir)
+    model.eval()
+    model.to(device)
+    print("  Model loaded.")
 
-print(f"\n  Member losses     — mean: {member_losses.mean():.4f}, std: {member_losses.std():.4f}")
-print(f"  Non-member losses — mean: {nonmember_losses.mean():.4f}, std: {nonmember_losses.std():.4f}")
+    print("[2/3] Computing per-sample losses...")
+    member_losses = compute_losses(model, tokenizer, member_path, "members", max_length, device)
+    nonmember_losses = compute_losses(model, tokenizer, nonmember_path, "non-members", max_length, device)
 
-# ── Compute MIA metrics ───────────────────────────────────────
-print("\n[3/4] Computing MIA metrics...")
+    if len(member_losses) == 0 or len(nonmember_losses) == 0:
+        raise ValueError(f"Empty loss arrays for {model_dir}. Check data files and tokenizer settings.")
 
-# Ground truth labels: 1 = member, 0 = non-member
-y_true  = np.concatenate([
-    np.ones(len(member_losses)),
-    np.zeros(len(nonmember_losses))
-])
+    print(f"  Member losses     — mean: {member_losses.mean():.4f}, std: {member_losses.std():.4f}")
+    print(f"  Non-member losses — mean: {nonmember_losses.mean():.4f}, std: {nonmember_losses.std():.4f}")
 
-# Attack score: NEGATIVE loss (higher score → more likely member)
-# We negate because lower loss = more likely member
-y_score = np.concatenate([
-    -member_losses,
-    -nonmember_losses
-])
+    print("[3/3] Computing MIA metrics...")
+    y_true = np.concatenate([
+        np.ones(len(member_losses)),
+        np.zeros(len(nonmember_losses)),
+    ])
+    y_score = np.concatenate([
+        -member_losses,
+        -nonmember_losses,
+    ])
 
-# ROC curve & AUC
-fpr, tpr, thresholds = roc_curve(y_true, y_score)
-roc_auc = auc(fpr, tpr)
+    fpr, tpr, _ = roc_curve(y_true, y_score)
+    roc_auc = auc(fpr, tpr)
+    tpr_at_1 = tpr_at_fpr(fpr, tpr, 0.01)
+    tpr_at_5 = tpr_at_fpr(fpr, tpr, 0.05)
+    tpr_at_10 = tpr_at_fpr(fpr, tpr, 0.10)
 
-# TPR at specific low FPR thresholds (key privacy metrics)
-tpr_at_1  = tpr_at_fpr(fpr, tpr, 0.01)
-tpr_at_5  = tpr_at_fpr(fpr, tpr, 0.05)
-tpr_at_10 = tpr_at_fpr(fpr, tpr, 0.10)
+    return {
+        "model_dir": model_dir,
+        "model_name": os.path.basename(model_dir.rstrip("/")),
+        "metrics": {
+            "auc_roc": float(roc_auc),
+            "tpr_at_1_fpr": float(tpr_at_1),
+            "tpr_at_5_fpr": float(tpr_at_5),
+            "tpr_at_10_fpr": float(tpr_at_10),
+            "member_count": int(len(member_losses)),
+            "nonmember_count": int(len(nonmember_losses)),
+            "member_loss_mean": float(member_losses.mean()),
+            "member_loss_std": float(member_losses.std()),
+            "member_loss_min": float(member_losses.min()),
+            "member_loss_max": float(member_losses.max()),
+            "nonmember_loss_mean": float(nonmember_losses.mean()),
+            "nonmember_loss_std": float(nonmember_losses.std()),
+            "nonmember_loss_min": float(nonmember_losses.min()),
+            "nonmember_loss_max": float(nonmember_losses.max()),
+            "loss_gap": float(nonmember_losses.mean() - member_losses.mean()),
+        },
+        "roc": {
+            "fpr": fpr.tolist(),
+            "tpr": tpr.tolist(),
+        },
+        "member_losses": member_losses.tolist(),
+        "nonmember_losses": nonmember_losses.tolist(),
+    }
+
+# ── Execute ───────────────────────────────────────────────────
+result = evaluate_model(MODEL_DIR, MEMBER_PATH, NONMEMBER_PATH, MAX_LENGTH, device)
+m = result["metrics"]
 
 print(f"\n  ┌─────────────────────────────────────┐")
 print(f"  │   MIA Results (Full Fine-Tuning)    │")
 print(f"  ├─────────────────────────────────────┤")
-print(f"  │  AUC-ROC         : {roc_auc:.4f}          │")
-print(f"  │  TPR @ 1%  FPR   : {tpr_at_1:.4f}          │")
-print(f"  │  TPR @ 5%  FPR   : {tpr_at_5:.4f}          │")
-print(f"  │  TPR @ 10% FPR   : {tpr_at_10:.4f}          │")
+print(f"  │  AUC-ROC         : {m['auc_roc']:.4f}          │")
+print(f"  │  TPR @ 1%  FPR   : {m['tpr_at_1_fpr']:.4f}          │")
+print(f"  │  TPR @ 5%  FPR   : {m['tpr_at_5_fpr']:.4f}          │")
+print(f"  │  TPR @ 10% FPR   : {m['tpr_at_10_fpr']:.4f}          │")
 print(f"  │  Random baseline  : AUC = 0.5000         │")
 print(f"  └─────────────────────────────────────┘")
 
 # Save text results
 results_text = f"""MIA Results — Full Fine-Tuning Baseline
 ========================================
-Model            : GPT-2 Medium (Full Fine-Tuning)
+Model            : {result['model_name']}
 Dataset          : PubMed Abstracts
-Members eval     : {len(member_losses)} samples
-Non-members eval : {len(nonmember_losses)} samples
+Members eval     : {m['member_count']} samples
+Non-members eval : {m['nonmember_count']} samples
 Attack           : Loss-Threshold (Yeom et al. 2018)
 
 Results:
-  AUC-ROC          : {roc_auc:.4f}
-  TPR @ 1%  FPR   : {tpr_at_1:.4f}
-  TPR @ 5%  FPR   : {tpr_at_5:.4f}
-  TPR @ 10% FPR   : {tpr_at_10:.4f}
+  AUC-ROC          : {m['auc_roc']:.4f}
+  TPR @ 1%  FPR   : {m['tpr_at_1_fpr']:.4f}
+  TPR @ 5%  FPR   : {m['tpr_at_5_fpr']:.4f}
+  TPR @ 10% FPR   : {m['tpr_at_10_fpr']:.4f}
   Random baseline  : AUC = 0.5000
 
 Member loss stats:
-  Mean : {member_losses.mean():.4f}
-  Std  : {member_losses.std():.4f}
-  Min  : {member_losses.min():.4f}
-  Max  : {member_losses.max():.4f}
+  Mean : {m['member_loss_mean']:.4f}
+  Std  : {m['member_loss_std']:.4f}
+  Min  : {m['member_loss_min']:.4f}
+  Max  : {m['member_loss_max']:.4f}
 
 Non-member loss stats:
-  Mean : {nonmember_losses.mean():.4f}
-  Std  : {nonmember_losses.std():.4f}
-  Min  : {nonmember_losses.min():.4f}
-  Max  : {nonmember_losses.max():.4f}
+  Mean : {m['nonmember_loss_mean']:.4f}
+  Std  : {m['nonmember_loss_std']:.4f}
+  Min  : {m['nonmember_loss_min']:.4f}
+  Max  : {m['nonmember_loss_max']:.4f}
 """
 with open(os.path.join(OUTPUT_DIR, "mia_results.txt"), "w") as f:
     f.write(results_text)
@@ -174,19 +200,22 @@ FIG_DPI = 150
 # ── Plot 1: ROC Curve ─────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(7, 6))
 
-ax.plot(fpr, tpr,
+fpr_arr = np.array(result["roc"]["fpr"])
+tpr_arr = np.array(result["roc"]["tpr"])
+
+ax.plot(fpr_arr, tpr_arr,
         color="steelblue", lw=2.5,
-        label=f"Full Fine-Tuning (AUC = {roc_auc:.3f})")
+        label=f"Full Fine-Tuning (AUC = {m['auc_roc']:.3f})")
 ax.plot([0, 1], [0, 1],
         color="gray", lw=1.5, linestyle="--",
         label="Random Classifier (AUC = 0.500)")
 
 # Mark TPR @ 1% FPR on the curve
-ax.scatter([0.01], [tpr_at_1], color="red", zorder=5, s=80)
+ax.scatter([0.01], [m['tpr_at_1_fpr']], color="red", zorder=5, s=80)
 ax.annotate(
-    f"TPR={tpr_at_1:.3f}\n@ FPR=1%",
-    xy=(0.01, tpr_at_1),
-    xytext=(0.08, tpr_at_1 - 0.08),
+    f"TPR={m['tpr_at_1_fpr']:.3f}\n@ FPR=1%",
+    xy=(0.01, m['tpr_at_1_fpr']),
+    xytext=(0.08, m['tpr_at_1_fpr'] - 0.08),
     fontsize=9,
     color="red",
     arrowprops=dict(arrowstyle="->", color="red", lw=1.2)
@@ -209,21 +238,24 @@ print(f"  Saved: {roc_path}")
 # ── Plot 2: Loss Distribution ─────────────────────────────────
 fig, ax = plt.subplots(figsize=(8, 5))
 
+mem_losses = np.array(result["member_losses"])
+nonmem_losses = np.array(result["nonmember_losses"])
+
 bins = np.linspace(
-    min(member_losses.min(), nonmember_losses.min()),
-    max(member_losses.max(), nonmember_losses.max()),
+    min(mem_losses.min(), nonmem_losses.min()),
+    max(mem_losses.max(), nonmem_losses.max()),
     60
 )
 
-ax.hist(member_losses,    bins=bins, alpha=0.65, color="steelblue",
-        label=f"Members (n={len(member_losses)})", density=True)
-ax.hist(nonmember_losses, bins=bins, alpha=0.65, color="salmon",
-        label=f"Non-members (n={len(nonmember_losses)})", density=True)
+ax.hist(mem_losses,    bins=bins, alpha=0.65, color="steelblue",
+        label=f"Members (n={len(mem_losses)})", density=True)
+ax.hist(nonmem_losses, bins=bins, alpha=0.65, color="salmon",
+        label=f"Non-members (n={len(nonmem_losses)})", density=True)
 
-ax.axvline(member_losses.mean(),    color="steelblue", linestyle="--", lw=2,
-           label=f"Member mean = {member_losses.mean():.3f}")
-ax.axvline(nonmember_losses.mean(), color="salmon",    linestyle="--", lw=2,
-           label=f"Non-member mean = {nonmember_losses.mean():.3f}")
+ax.axvline(mem_losses.mean(),    color="steelblue", linestyle="--", lw=2,
+           label=f"Member mean = {mem_losses.mean():.3f}")
+ax.axvline(nonmem_losses.mean(), color="salmon",    linestyle="--", lw=2,
+           label=f"Non-member mean = {nonmem_losses.mean():.3f}")
 
 ax.set_xlabel("Per-Sample Cross-Entropy Loss", fontsize=13)
 ax.set_ylabel("Density", fontsize=13)
@@ -247,8 +279,8 @@ print(f"""
    mia_results.txt       → your key numbers
 
  Key numbers to report in mid-term:
-   AUC-ROC        : {roc_auc:.4f}
-   TPR @ 1% FPR  : {tpr_at_1:.4f}
+   AUC-ROC        : {m['auc_roc']:.4f}
+   TPR @ 1% FPR  : {m['tpr_at_1_fpr']:.4f}
    (Random baseline AUC = 0.5000)
 ================================================
 """)
