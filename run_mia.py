@@ -11,6 +11,7 @@ Core idea:
 
 Usage:
     python run_mia.py
+    python run_mia.py --model-dir ./models/my_custom_model
 
 Outputs (in ./results/):
     roc_curve.png          - ROC curve plot (ready for slides)
@@ -18,6 +19,7 @@ Outputs (in ./results/):
     mia_results.txt        - AUC, TPR@1%FPR, TPR@5%FPR numbers
 """
 
+import argparse
 import os
 import json
 import numpy as np
@@ -29,25 +31,8 @@ from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 from sklearn.metrics import roc_curve, auc
 from tqdm import tqdm
 
-# ── Configuration ────────────────────────────────────────────
-MODEL_DIR       = "./models/full_ft"
-MEMBER_PATH     = "./data/member_eval.txt"
-NONMEMBER_PATH  = "./data/nonmember_eval.txt"
-OUTPUT_DIR      = "./results"
-MAX_LENGTH      = 256
-BATCH_SIZE      = 8
-# ─────────────────────────────────────────────────────────────
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-
 # ── Utility Functions ─────────────────────────────────────────
 def compute_losses(model, tokenizer, text_path, label, max_length, device):
-    """
-    For each text sample, compute the average per-token cross-entropy loss.
-    Lower loss = model is more 'familiar' with the text = likely member.
-    """
     with open(text_path, "r", encoding="utf-8") as f:
         texts = [l.strip() for l in f if l.strip()]
 
@@ -63,19 +48,16 @@ def compute_losses(model, tokenizer, text_path, label, max_length, device):
             )
             input_ids = enc["input_ids"].to(device)
 
-            # Skip very short sequences (< 5 tokens)
             if input_ids.shape[1] < 5:
                 continue
 
             outputs = model(input_ids=input_ids, labels=input_ids)
-            # outputs.loss is the mean per-token cross-entropy loss
             losses.append(outputs.loss.item())
 
     return np.array(losses)
 
 
 def tpr_at_fpr(fpr_arr, tpr_arr, target_fpr):
-    """Find the TPR at the closest FPR ≤ target_fpr."""
     mask = fpr_arr <= target_fpr
     if not mask.any():
         return 0.0
@@ -146,25 +128,13 @@ def evaluate_model(model_dir, member_path, nonmember_path, max_length, device):
         "nonmember_losses": nonmember_losses.tolist(),
     }
 
-# ── Execute ───────────────────────────────────────────────────
-result = evaluate_model(MODEL_DIR, MEMBER_PATH, NONMEMBER_PATH, MAX_LENGTH, device)
-m = result["metrics"]
-
-print(f"\n  ┌─────────────────────────────────────┐")
-print(f"  │   MIA Results (Full Fine-Tuning)    │")
-print(f"  ├─────────────────────────────────────┤")
-print(f"  │  AUC-ROC         : {m['auc_roc']:.4f}          │")
-print(f"  │  TPR @ 1%  FPR   : {m['tpr_at_1_fpr']:.4f}          │")
-print(f"  │  TPR @ 5%  FPR   : {m['tpr_at_5_fpr']:.4f}          │")
-print(f"  │  TPR @ 10% FPR   : {m['tpr_at_10_fpr']:.4f}          │")
-print(f"  │  Random baseline  : AUC = 0.5000         │")
-print(f"  └─────────────────────────────────────┘")
-
-# Save text results
-results_text = f"""MIA Results — Full Fine-Tuning Baseline
+# ── Reporting and Plotting ────────────────────────────────────
+def write_legacy_summary(output_path, first_result):
+    m = first_result["metrics"]
+    results_text = f"""MIA Results — {first_result['model_name']}
 ========================================
-Model            : {result['model_name']}
-Dataset          : PubMed Abstracts
+Model            : {first_result['model_name']}
+Model directory  : {first_result['model_dir']}
 Members eval     : {m['member_count']} samples
 Non-members eval : {m['nonmember_count']} samples
 Attack           : Loss-Threshold (Yeom et al. 2018)
@@ -188,91 +158,93 @@ Non-member loss stats:
   Min  : {m['nonmember_loss_min']:.4f}
   Max  : {m['nonmember_loss_max']:.4f}
 """
-with open(os.path.join(OUTPUT_DIR, "mia_results.txt"), "w") as f:
-    f.write(results_text)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(results_text)
 
-# ── Generate plots ────────────────────────────────────────────
-print("\n[4/4] Generating plots...")
+def plot_comparative_roc(output_path, results):
+    plt.style.use("seaborn-v0_8-whitegrid")
+    fig, ax = plt.subplots(figsize=(7, 6))
 
-plt.style.use("seaborn-v0_8-whitegrid")
-FIG_DPI = 150
+    for item in results:
+        fpr = np.array(item["roc"]["fpr"])
+        tpr = np.array(item["roc"]["tpr"])
+        ax.plot(fpr, tpr, lw=2.2,
+                label=f"{item['model_name']} (AUC={item['metrics']['auc_roc']:.3f})")
 
-# ── Plot 1: ROC Curve ─────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(7, 6))
+    ax.plot([0, 1], [0, 1], color="gray", lw=1.5, linestyle="--", label="Random (AUC=0.500)")
+    ax.set_xlim([0.0, 1.0])
+    ax.set_ylim([0.0, 1.05])
+    ax.set_xlabel("False Positive Rate (FPR)", fontsize=13)
+    ax.set_ylabel("True Positive Rate (TPR)", fontsize=13)
+    ax.set_title("Comparative ROC — Loss-Threshold MIA", fontsize=13)
+    ax.legend(loc="lower right", fontsize=10)
+    ax.tick_params(labelsize=11)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
 
-fpr_arr = np.array(result["roc"]["fpr"])
-tpr_arr = np.array(result["roc"]["tpr"])
+def plot_first_loss_distribution(output_path, first_result):
+    member_losses = np.array(first_result["member_losses"])
+    nonmember_losses = np.array(first_result["nonmember_losses"])
 
-ax.plot(fpr_arr, tpr_arr,
-        color="steelblue", lw=2.5,
-        label=f"Full Fine-Tuning (AUC = {m['auc_roc']:.3f})")
-ax.plot([0, 1], [0, 1],
-        color="gray", lw=1.5, linestyle="--",
-        label="Random Classifier (AUC = 0.500)")
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bins = np.linspace(
+        min(member_losses.min(), nonmember_losses.min()),
+        max(member_losses.max(), nonmember_losses.max()),
+        60,
+    )
+    ax.hist(member_losses, bins=bins, alpha=0.65, color="steelblue",
+            label=f"Members (n={len(member_losses)})", density=True)
+    ax.hist(nonmember_losses, bins=bins, alpha=0.65, color="salmon",
+            label=f"Non-members (n={len(nonmember_losses)})", density=True)
+    ax.axvline(member_losses.mean(), color="steelblue", linestyle="--", lw=2,
+               label=f"Member mean = {member_losses.mean():.3f}")
+    ax.axvline(nonmember_losses.mean(), color="salmon", linestyle="--", lw=2,
+               label=f"Non-member mean = {nonmember_losses.mean():.3f}")
 
-# Mark TPR @ 1% FPR on the curve
-ax.scatter([0.01], [m['tpr_at_1_fpr']], color="red", zorder=5, s=80)
-ax.annotate(
-    f"TPR={m['tpr_at_1_fpr']:.3f}\n@ FPR=1%",
-    xy=(0.01, m['tpr_at_1_fpr']),
-    xytext=(0.08, m['tpr_at_1_fpr'] - 0.08),
-    fontsize=9,
-    color="red",
-    arrowprops=dict(arrowstyle="->", color="red", lw=1.2)
-)
+    ax.set_xlabel("Per-Sample Cross-Entropy Loss", fontsize=13)
+    ax.set_ylabel("Density", fontsize=13)
+    ax.set_title(f"Loss Distribution: Members vs. Non-Members\n{first_result['model_name']}", fontsize=13)
+    ax.legend(fontsize=10)
+    ax.tick_params(labelsize=11)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
 
-ax.set_xlim([0.0, 1.0])
-ax.set_ylim([0.0, 1.05])
-ax.set_xlabel("False Positive Rate (FPR)", fontsize=13)
-ax.set_ylabel("True Positive Rate (TPR)", fontsize=13)
-ax.set_title("ROC Curve — Loss-Threshold MIA\nGPT-2 Medium (Full Fine-Tuning) on PubMed", fontsize=13)
-ax.legend(loc="lower right", fontsize=11)
-ax.tick_params(labelsize=11)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run loss-threshold MIA against a model")
+    parser.add_argument("--model-dir", type=str, default="./models/full_ft")
+    parser.add_argument("--member-path", type=str, default="./data/member_eval.txt")
+    parser.add_argument("--nonmember-path", type=str, default="./data/nonmember_eval.txt")
+    parser.add_argument("--output-dir", type=str, default="./results")
+    parser.add_argument("--max-length", type=int, default=256)
+    return parser.parse_args()
 
-plt.tight_layout()
-roc_path = os.path.join(OUTPUT_DIR, "roc_curve.png")
-plt.savefig(roc_path, dpi=FIG_DPI)
-plt.close()
-print(f"  Saved: {roc_path}")
+def main():
+    args = parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
-# ── Plot 2: Loss Distribution ─────────────────────────────────
-fig, ax = plt.subplots(figsize=(8, 5))
+    print("\n[4/4] Generating results and plots...")
 
-mem_losses = np.array(result["member_losses"])
-nonmem_losses = np.array(result["nonmember_losses"])
+    result = evaluate_model(args.model_dir, args.member_path, args.nonmember_path, args.max_length, device)
+    results = [result]
 
-bins = np.linspace(
-    min(mem_losses.min(), nonmem_losses.min()),
-    max(mem_losses.max(), nonmem_losses.max()),
-    60
-)
+    legacy_txt_path = os.path.join(args.output_dir, "mia_results.txt")
+    roc_path = os.path.join(args.output_dir, "roc_curve.png")
+    dist_path = os.path.join(args.output_dir, "loss_distribution.png")
 
-ax.hist(mem_losses,    bins=bins, alpha=0.65, color="steelblue",
-        label=f"Members (n={len(mem_losses)})", density=True)
-ax.hist(nonmem_losses, bins=bins, alpha=0.65, color="salmon",
-        label=f"Non-members (n={len(nonmem_losses)})", density=True)
+    write_legacy_summary(legacy_txt_path, result)
+    plot_comparative_roc(roc_path, results)
+    plot_first_loss_distribution(dist_path, result)
 
-ax.axvline(mem_losses.mean(),    color="steelblue", linestyle="--", lw=2,
-           label=f"Member mean = {mem_losses.mean():.3f}")
-ax.axvline(nonmem_losses.mean(), color="salmon",    linestyle="--", lw=2,
-           label=f"Non-member mean = {nonmem_losses.mean():.3f}")
-
-ax.set_xlabel("Per-Sample Cross-Entropy Loss", fontsize=13)
-ax.set_ylabel("Density", fontsize=13)
-ax.set_title("Loss Distribution: Members vs. Non-Members\nGPT-2 Medium (Full Fine-Tuning) on PubMed", fontsize=13)
-ax.legend(fontsize=10)
-ax.tick_params(labelsize=11)
-
-plt.tight_layout()
-dist_path = os.path.join(OUTPUT_DIR, "loss_distribution.png")
-plt.savefig(dist_path, dpi=FIG_DPI)
-plt.close()
-print(f"  Saved: {dist_path}")
-
-# ── Done ──────────────────────────────────────────────────────
-print(f"""
+    m = result["metrics"]
+    print(f"""
 ================================================
- All done! Results saved to: {OUTPUT_DIR}/
+ All done! Results saved to: {args.output_dir}/
 
    roc_curve.png         → use this in your slides
    loss_distribution.png → use this in your slides
@@ -284,3 +256,6 @@ print(f"""
    (Random baseline AUC = 0.5000)
 ================================================
 """)
+
+if __name__ == "__main__":
+    main()
