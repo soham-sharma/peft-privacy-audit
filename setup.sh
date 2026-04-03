@@ -1,9 +1,4 @@
 #!/bin/bash
-# ============================================================
-# STEP 1: Environment Setup
-# Run this first, once.
-# Usage: bash setup.sh
-# ============================================================
 
 set -e  # Exit immediately on error
 
@@ -21,8 +16,6 @@ echo "[2/5] Upgrading pip..."
 pip install --upgrade pip
 
 # --- 3. Install PyTorch with CUDA 12.1 support ---
-# If your CUDA version differs, visit https://pytorch.org/get-started/locally/
-# to get the right install command. Check your CUDA version with: nvcc --version
 echo "[3/5] Installing PyTorch (CUDA 12.1)..."
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
@@ -55,7 +48,5 @@ else:
 
 echo ""
 echo "========================================"
-echo " Setup complete!"
-echo " To activate the environment later, run:"
-echo "   source mia_env/bin/activate"
+echo " Setup complete"
 echo "========================================"
