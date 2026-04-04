@@ -5,5 +5,7 @@ mia_env/
 data/
 models/
 results/
+result/
 log.txt
+log_exp.txt 
 training_log.txt
