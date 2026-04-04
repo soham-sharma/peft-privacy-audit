@@ -1,25 +1,20 @@
 """
-STEP 4: Membership Inference Attack (Loss-Threshold)
-=====================================================
-Runs the loss-threshold MIA against the fine-tuned model.
-
-Core idea:
-  - Fine-tuned models have LOWER loss on training samples (members)
-    than on unseen samples (non-members).
-  - The attack predicts "member" if loss(model, x) < threshold τ.
-  - We sweep τ to build a full ROC curve.
+Runs the loss-threshold MIA against one or more trained models.
 
 Usage:
     python run_mia.py
-    python run_mia.py --model-dir ./models/my_custom_model
+    python run_mia.py --model-dirs ./models/full_ft ./models/lora_r4 ./models/lora_r16
 
 Outputs (in ./results/):
-    roc_curve.png          - ROC curve plot (ready for slides)
-    loss_distribution.png  - loss histogram (members vs non-members)
-    mia_results.txt        - AUC, TPR@1%FPR, TPR@5%FPR numbers
+    roc_curve.png              - comparative ROC curve plot
+    loss_distribution.png      - histogram for first evaluated model
+    mia_results.txt            - legacy summary for first model
+    mia_results_all.json       - per-model structured metrics
+    mia_results_summary.csv    - per-model tabular metrics
 """
 
 import argparse
+import csv
 import os
 import json
 import numpy as np
@@ -80,6 +75,8 @@ def evaluate_model(model_dir, member_path, nonmember_path, max_length, device):
 
     if len(member_losses) == 0 or len(nonmember_losses) == 0:
         raise ValueError(f"Empty loss arrays for {model_dir}. Check data files and tokenizer settings.")
+    if len(member_losses) != len(nonmember_losses):
+        raise ValueError(f"Sample count mismatch for {model_dir}. Use balanced eval splits for fair MIA comparison.")
 
     print(f"  Member losses     — mean: {member_losses.mean():.4f}, std: {member_losses.std():.4f}")
     print(f"  Non-member losses — mean: {nonmember_losses.mean():.4f}, std: {nonmember_losses.std():.4f}")
@@ -129,6 +126,28 @@ def evaluate_model(model_dir, member_path, nonmember_path, max_length, device):
     }
 
 # ── Reporting and Plotting ────────────────────────────────────
+def save_csv_summary(output_path, results):
+    rows = []
+    for item in results:
+        m = item["metrics"]
+        rows.append({
+            "model_name": item["model_name"],
+            "model_dir": item["model_dir"],
+            "auc_roc": m["auc_roc"],
+            "tpr_at_1_fpr": m["tpr_at_1_fpr"],
+            "tpr_at_5_fpr": m["tpr_at_5_fpr"],
+            "tpr_at_10_fpr": m["tpr_at_10_fpr"],
+            "member_count": m["member_count"],
+            "nonmember_count": m["nonmember_count"],
+            "member_loss_mean": m["member_loss_mean"],
+            "nonmember_loss_mean": m["nonmember_loss_mean"],
+            "loss_gap": m["loss_gap"],
+        })
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
 def write_legacy_summary(output_path, first_result):
     m = first_result["metrics"]
     results_text = f"""MIA Results — {first_result['model_name']}
@@ -213,13 +232,25 @@ def plot_first_loss_distribution(output_path, first_result):
     plt.savefig(output_path, dpi=150)
     plt.close()
 
+def print_console_summary(results):
+    print("\n┌──────────────────────────────────────────────────────────────┐")
+    print("│                 MIA Comparative Summary                      │")
+    print("├──────────────────────────────────────────────────────────────┤")
+    for item in results:
+        m = item["metrics"]
+        print(f"│ {item['model_name']:<16} AUC={m['auc_roc']:.4f}  TPR@1%={m['tpr_at_1_fpr']:.4f}          │")
+    print("└──────────────────────────────────────────────────────────────┘")
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run loss-threshold MIA against a model")
-    parser.add_argument("--model-dir", type=str, default="./models/full_ft")
+    parser = argparse.ArgumentParser(description="Run loss-threshold MIA across one or more models")
+    parser.add_argument("--model-dirs", nargs="+", default=["./models/full_ft"],
+                        help="Model directories to evaluate.")
     parser.add_argument("--member-path", type=str, default="./data/member_eval.txt")
     parser.add_argument("--nonmember-path", type=str, default="./data/nonmember_eval.txt")
     parser.add_argument("--output-dir", type=str, default="./results")
     parser.add_argument("--max-length", type=int, default=256)
+    parser.add_argument("--no-model-progress", action="store_true",
+                        help="Disable top-level progress bar over models")
     return parser.parse_args()
 
 def main():
@@ -228,34 +259,38 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    print("\n[4/4] Generating results and plots...")
+    model_dirs = args.model_dirs
+    print(f"\nDiscovered {len(model_dirs)} model(s) for evaluation.")
+    
+    model_iter = model_dirs
+    if not args.no_model_progress:
+        model_iter = tqdm(model_dirs, desc="MIA models")
+        
+    results = [evaluate_model(m_dir, args.member_path, args.nonmember_path, args.max_length, device) for m_dir in model_iter]
+    print_console_summary(results)
 
-    result = evaluate_model(args.model_dir, args.member_path, args.nonmember_path, args.max_length, device)
-    results = [result]
+    # Save structured outputs
+    json_path = os.path.join(args.output_dir, "mia_results_all.json")
+    csv_path = os.path.join(args.output_dir, "mia_results_summary.csv")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+    save_csv_summary(csv_path, results)
 
+    # Backward compatible single-file summary and plots based on first model.
+    first = results[0]
     legacy_txt_path = os.path.join(args.output_dir, "mia_results.txt")
+    write_legacy_summary(legacy_txt_path, first)
+
     roc_path = os.path.join(args.output_dir, "roc_curve.png")
     dist_path = os.path.join(args.output_dir, "loss_distribution.png")
-
-    write_legacy_summary(legacy_txt_path, result)
     plot_comparative_roc(roc_path, results)
-    plot_first_loss_distribution(dist_path, result)
+    plot_first_loss_distribution(dist_path, first)
 
-    m = result["metrics"]
-    print(f"""
-================================================
- All done! Results saved to: {args.output_dir}/
-
-   roc_curve.png         → use this in your slides
-   loss_distribution.png → use this in your slides
-   mia_results.txt       → your key numbers
-
- Key numbers to report in mid-term:
-   AUC-ROC        : {m['auc_roc']:.4f}
-   TPR @ 1% FPR  : {m['tpr_at_1_fpr']:.4f}
-   (Random baseline AUC = 0.5000)
-================================================
-""")
+    print(f"\nSaved structured results: {json_path}")
+    print(f"Saved summary CSV       : {csv_path}")
+    print(f"Saved legacy summary    : {legacy_txt_path}")
+    print(f"Saved comparative ROC   : {roc_path}")
+    print(f"Saved loss distribution : {dist_path}")
 
 if __name__ == "__main__":
     main()
