@@ -23,11 +23,96 @@ import matplotlib
 matplotlib.use("Agg")   # non-interactive backend (works in WSL)
 import matplotlib.pyplot as plt
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
+from peft import PeftConfig, PeftModel
 from sklearn.metrics import roc_curve, auc
 from tqdm import tqdm
 
-# ── Utility Functions ─────────────────────────────────────────
+# ── Configuration ────────────────────────────────────────────
+MEMBER_PATH     = "./data/member_eval.txt"
+NONMEMBER_PATH  = "./data/nonmember_eval.txt"
+OUTPUT_DIR      = "./results"
+MAX_LENGTH      = 256
+# ─────────────────────────────────────────────────────────────
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run loss-threshold MIA across one or more models")
+    parser.add_argument("--model-dirs", nargs="+", default=None,
+                        help="Model directories to evaluate. If omitted, auto-discovers under ./models")
+    parser.add_argument("--member-path", type=str, default=MEMBER_PATH)
+    parser.add_argument("--nonmember-path", type=str, default=NONMEMBER_PATH)
+    parser.add_argument("--output-dir", type=str, default=OUTPUT_DIR)
+    parser.add_argument("--max-length", type=int, default=MAX_LENGTH)
+    parser.add_argument("--no-model-progress", action="store_true",
+                        help="Disable top-level progress bar over models")
+    parser.add_argument("--include-untrained-baseline", action="store_true",
+                        help="Include an unfine-tuned baseline model in evaluation")
+    parser.add_argument("--baseline-model-name", type=str, default="gpt2-medium",
+                        help="HuggingFace model ID for the untrained baseline")
+    return parser.parse_args()
+
+
+def discover_model_dirs(root="./models"):
+    dirs = []
+    if not os.path.isdir(root):
+        return dirs
+    for name in sorted(os.listdir(root)):
+        path = os.path.join(root, name)
+        if not os.path.isdir(path):
+            continue
+        has_full_model = os.path.exists(os.path.join(path, "config.json"))
+        has_adapter = os.path.exists(os.path.join(path, "adapter_config.json"))
+        if has_full_model or has_adapter:
+            dirs.append(path)
+    return dirs
+
+
+def is_hf_reference(model_ref):
+    return model_ref.startswith("hf://")
+
+
+def model_ref_to_name(model_ref):
+    if is_hf_reference(model_ref):
+        base = model_ref.split("hf://", 1)[1]
+        return f"untrained_{base.replace('-', '_').replace('/', '_')}"
+    return os.path.basename(model_ref.rstrip("/"))
+
+
+def load_model_and_tokenizer(model_ref, device):
+    if is_hf_reference(model_ref):
+        base_model_name = model_ref.split("hf://", 1)[1]
+        tokenizer = GPT2TokenizerFast.from_pretrained(base_model_name)
+        tokenizer.pad_token = tokenizer.eos_token
+        model = GPT2LMHeadModel.from_pretrained(base_model_name)
+        model.config.pad_token_id = tokenizer.eos_token_id
+        model.eval()
+        model.to(device)
+        return model, tokenizer
+
+    model_dir = model_ref
+    adapter_config_path = os.path.join(model_dir, "adapter_config.json")
+    if os.path.exists(adapter_config_path):
+        peft_config = PeftConfig.from_pretrained(model_dir)
+        tokenizer = GPT2TokenizerFast.from_pretrained(peft_config.base_model_name_or_path)
+        tokenizer.pad_token = tokenizer.eos_token
+        base_model = GPT2LMHeadModel.from_pretrained(peft_config.base_model_name_or_path)
+        base_model.config.pad_token_id = tokenizer.eos_token_id
+        model = PeftModel.from_pretrained(base_model, model_dir)
+    else:
+        tokenizer = GPT2TokenizerFast.from_pretrained(model_dir)
+        tokenizer.pad_token = tokenizer.eos_token
+        model = GPT2LMHeadModel.from_pretrained(model_dir)
+        model.config.pad_token_id = tokenizer.eos_token_id
+
+    model.eval()
+    model.to(device)
+    return model, tokenizer
+
+# ── Compute per-sample loss ───────────────────────────────────
 def compute_losses(model, tokenizer, text_path, label, max_length, device):
+    """
+    For each text sample, compute the average per-token cross-entropy loss.
+    Lower loss = model is more 'familiar' with the text = likely member.
+    """
     with open(text_path, "r", encoding="utf-8") as f:
         texts = [l.strip() for l in f if l.strip()]
 
@@ -43,40 +128,45 @@ def compute_losses(model, tokenizer, text_path, label, max_length, device):
             )
             input_ids = enc["input_ids"].to(device)
 
+            # Skip very short sequences (< 5 tokens)
             if input_ids.shape[1] < 5:
                 continue
 
             outputs = model(input_ids=input_ids, labels=input_ids)
+            # outputs.loss is the mean per-token cross-entropy loss
             losses.append(outputs.loss.item())
 
     return np.array(losses)
 
-
 def tpr_at_fpr(fpr_arr, tpr_arr, target_fpr):
+    """Find the TPR at the closest FPR ≤ target_fpr."""
     mask = fpr_arr <= target_fpr
     if not mask.any():
         return 0.0
     return tpr_arr[mask][-1]
 
-# ── Core Evaluation Logic ─────────────────────────────────────
-def evaluate_model(model_dir, member_path, nonmember_path, max_length, device):
-    print(f"\nEvaluating model: {model_dir}")
+
+def evaluate_model(model_ref, args, device):
+    print(f"\nEvaluating model: {model_ref}")
     print("[1/3] Loading model...")
-    tokenizer = GPT2TokenizerFast.from_pretrained(model_dir)
-    tokenizer.pad_token = tokenizer.eos_token
-    model = GPT2LMHeadModel.from_pretrained(model_dir)
-    model.eval()
-    model.to(device)
+    model, tokenizer = load_model_and_tokenizer(model_ref, device)
     print("  Model loaded.")
 
     print("[2/3] Computing per-sample losses...")
-    member_losses = compute_losses(model, tokenizer, member_path, "members", max_length, device)
-    nonmember_losses = compute_losses(model, tokenizer, nonmember_path, "non-members", max_length, device)
+    member_losses = compute_losses(model, tokenizer, args.member_path, "members", args.max_length, device)
+    nonmember_losses = compute_losses(model, tokenizer, args.nonmember_path, "non-members", args.max_length, device)
 
     if len(member_losses) == 0 or len(nonmember_losses) == 0:
-        raise ValueError(f"Empty loss arrays for {model_dir}. Check data files and tokenizer settings.")
+        raise ValueError(
+            f"Empty loss arrays for {model_ref}. "
+            "Check data files and tokenizer settings."
+        )
     if len(member_losses) != len(nonmember_losses):
-        raise ValueError(f"Sample count mismatch for {model_dir}. Use balanced eval splits for fair MIA comparison.")
+        raise ValueError(
+            f"Sample count mismatch for {model_ref}: "
+            f"members={len(member_losses)}, non-members={len(nonmember_losses)}. "
+            "Use balanced eval splits for fair MIA comparison."
+        )
 
     print(f"  Member losses     — mean: {member_losses.mean():.4f}, std: {member_losses.std():.4f}")
     print(f"  Non-member losses — mean: {nonmember_losses.mean():.4f}, std: {nonmember_losses.std():.4f}")
@@ -98,8 +188,8 @@ def evaluate_model(model_dir, member_path, nonmember_path, max_length, device):
     tpr_at_10 = tpr_at_fpr(fpr, tpr, 0.10)
 
     return {
-        "model_dir": model_dir,
-        "model_name": os.path.basename(model_dir.rstrip("/")),
+        "model_dir": model_ref,
+        "model_name": model_ref_to_name(model_ref),
         "metrics": {
             "auc_roc": float(roc_auc),
             "tpr_at_1_fpr": float(tpr_at_1),
@@ -125,7 +215,7 @@ def evaluate_model(model_dir, member_path, nonmember_path, max_length, device):
         "nonmember_losses": nonmember_losses.tolist(),
     }
 
-# ── Reporting and Plotting ────────────────────────────────────
+
 def save_csv_summary(output_path, results):
     rows = []
     for item in results:
@@ -147,6 +237,7 @@ def save_csv_summary(output_path, results):
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+
 
 def write_legacy_summary(output_path, first_result):
     m = first_result["metrics"]
@@ -180,6 +271,7 @@ Non-member loss stats:
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(results_text)
 
+
 def plot_comparative_roc(output_path, results):
     plt.style.use("seaborn-v0_8-whitegrid")
     fig, ax = plt.subplots(figsize=(7, 6))
@@ -192,16 +284,16 @@ def plot_comparative_roc(output_path, results):
 
     ax.plot([0, 1], [0, 1], color="gray", lw=1.5, linestyle="--", label="Random (AUC=0.500)")
     ax.set_xlim([0.0, 1.0])
-    ax.set_ylim([0.0, 1.05])
+    ax.set_ylim(0.0, 1.05)
     ax.set_xlabel("False Positive Rate (FPR)", fontsize=13)
     ax.set_ylabel("True Positive Rate (TPR)", fontsize=13)
     ax.set_title("Comparative ROC — Loss-Threshold MIA", fontsize=13)
     ax.legend(loc="lower right", fontsize=10)
     ax.tick_params(labelsize=11)
-    
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
+
 
 def plot_first_loss_distribution(output_path, first_result):
     member_losses = np.array(first_result["member_losses"])
@@ -227,10 +319,10 @@ def plot_first_loss_distribution(output_path, first_result):
     ax.set_title(f"Loss Distribution: Members vs. Non-Members\n{first_result['model_name']}", fontsize=13)
     ax.legend(fontsize=10)
     ax.tick_params(labelsize=11)
-    
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
+
 
 def print_console_summary(results):
     print("\n┌──────────────────────────────────────────────────────────────┐")
@@ -241,17 +333,6 @@ def print_console_summary(results):
         print(f"│ {item['model_name']:<16} AUC={m['auc_roc']:.4f}  TPR@1%={m['tpr_at_1_fpr']:.4f}          │")
     print("└──────────────────────────────────────────────────────────────┘")
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Run loss-threshold MIA across one or more models")
-    parser.add_argument("--model-dirs", nargs="+", default=["./models/full_ft"],
-                        help="Model directories to evaluate.")
-    parser.add_argument("--member-path", type=str, default="./data/member_eval.txt")
-    parser.add_argument("--nonmember-path", type=str, default="./data/nonmember_eval.txt")
-    parser.add_argument("--output-dir", type=str, default="./results")
-    parser.add_argument("--max-length", type=int, default=256)
-    parser.add_argument("--no-model-progress", action="store_true",
-                        help="Disable top-level progress bar over models")
-    return parser.parse_args()
 
 def main():
     args = parse_args()
@@ -259,14 +340,24 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    model_dirs = args.model_dirs
+    model_dirs = args.model_dirs if args.model_dirs else discover_model_dirs("./models")
+    model_dirs = [d for d in model_dirs if os.path.isdir(d) or is_hf_reference(d)]
+    if args.include_untrained_baseline:
+        baseline_ref = f"hf://{args.baseline_model_name}"
+        if baseline_ref not in model_dirs:
+            model_dirs.append(baseline_ref)
+    if not model_dirs:
+        raise ValueError("No model directories found. Train at least one model before running MIA.")
+    if not os.path.exists(args.member_path):
+        raise FileNotFoundError(f"Member file not found: {args.member_path}")
+    if not os.path.exists(args.nonmember_path):
+        raise FileNotFoundError(f"Non-member file not found: {args.nonmember_path}")
+
     print(f"\nDiscovered {len(model_dirs)} model(s) for evaluation.")
-    
     model_iter = model_dirs
     if not args.no_model_progress:
         model_iter = tqdm(model_dirs, desc="MIA models")
-        
-    results = [evaluate_model(m_dir, args.member_path, args.nonmember_path, args.max_length, device) for m_dir in model_iter]
+    results = [evaluate_model(model_dir, args, device) for model_dir in model_iter]
     print_console_summary(results)
 
     # Save structured outputs
@@ -291,6 +382,7 @@ def main():
     print(f"Saved legacy summary    : {legacy_txt_path}")
     print(f"Saved comparative ROC   : {roc_path}")
     print(f"Saved loss distribution : {dist_path}")
+
 
 if __name__ == "__main__":
     main()
