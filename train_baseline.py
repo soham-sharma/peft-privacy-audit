@@ -17,6 +17,7 @@ import json
 import math
 import os
 import subprocess
+import sys
 import time
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -61,6 +62,13 @@ def parse_args():
     parser.add_argument("--max-length", type=int, default=MAX_LENGTH)
     parser.add_argument("--warmup-ratio", type=float, default=WARMUP_RATIO)
     parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--force-retrain", action="store_true",
+                        help="Ignore existing model artifacts and train from scratch")
+    parser.add_argument("--resume", dest="resume", action="store_true",
+                        help="Resume from epoch checkpoint if available (default)")
+    parser.add_argument("--no-resume", dest="resume", action="store_false",
+                        help="Disable checkpoint resume")
+    parser.set_defaults(resume=True)
     return parser.parse_args()
 
 
@@ -100,6 +108,32 @@ def get_git_commit_hash():
         ).strip()
     except Exception:
         return "unknown"
+
+
+def has_complete_model_artifacts(path):
+    full_model = (
+        os.path.exists(os.path.join(path, "config.json")) and
+        (
+            os.path.exists(os.path.join(path, "model.safetensors")) or
+            os.path.exists(os.path.join(path, "pytorch_model.bin"))
+        )
+    )
+    adapter_model = (
+        os.path.exists(os.path.join(path, "adapter_config.json")) and
+        (
+            os.path.exists(os.path.join(path, "adapter_model.safetensors")) or
+            os.path.exists(os.path.join(path, "adapter_model.bin"))
+        )
+    )
+    return full_model or adapter_model
+
+
+if has_complete_model_artifacts(output_dir) and not args.force_retrain:
+    print(f"\nFound completed model artifacts in {output_dir}.")
+    print("Skipping training to avoid retraining existing model.")
+    print("Use --force-retrain to train this output directory again.")
+    sys.exit(0)
+
 
 # ── Dataset class ─────────────────────────────────────────────
 class TextDataset(Dataset):
