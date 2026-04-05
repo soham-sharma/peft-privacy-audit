@@ -263,6 +263,12 @@ print(" Training...")
 print("=" * 50)
 
 log_lines = ["epoch,step,loss,elapsed_min\n"]
+if os.path.exists(log_path):
+    with open(log_path, "r", encoding="utf-8") as f:
+        existing = f.readlines()
+    if existing:
+        log_lines = existing
+
 start_time = time.time()
 skip_training_loop = start_epoch > args.epochs
 if skip_training_loop:
@@ -309,6 +315,19 @@ for epoch in range(start_epoch, args.epochs + 1):
     print(f"\n  Epoch {epoch} complete | avg loss: {avg_epoch_loss:.4f} | elapsed: {elapsed:.1f} min")
     log_lines.append(f"{epoch},{step_count},{avg_epoch_loss:.6f},{elapsed:.2f}\n")
 
+    torch.save(
+        {
+            "epoch": epoch,
+            "elapsed_min": elapsed,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "method": args.method,
+            "seed": args.seed,
+        },
+        checkpoint_path,
+    )
+
 # ── Save model ────────────────────────────────────────────────
 print("\n" + "=" * 50)
 print(f" Saving model to {output_dir}/")
@@ -353,7 +372,11 @@ with open(meta_path, "w", encoding="utf-8") as f:
     json.dump(metadata, f, indent=2)
 
 total_time = (time.time() - start_time) / 60
-print(f"\nTraining complete in {elapsed_before_min + total_time:.1f} minutes.")
+full_elapsed_min = elapsed_before_min + total_time
+if os.path.exists(checkpoint_path):
+    os.remove(checkpoint_path)
+
+print(f"\nTraining complete in {full_elapsed_min:.1f} minutes.")
 print(f"Model saved to    : {output_dir}/")
 print(f"Training log      : {log_path}")
 print(f"Run metadata      : {meta_path}")
