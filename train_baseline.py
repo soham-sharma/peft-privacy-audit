@@ -195,6 +195,7 @@ optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
 updates_per_epoch = max(1, math.ceil(len(dataloader) / args.grad_accum))
 total_steps   = updates_per_epoch * args.epochs
 warmup_steps  = int(total_steps * args.warmup_ratio)
+final_remainder = len(dataloader) % args.grad_accum
 
 scheduler = get_linear_schedule_with_warmup(
     optimizer,
@@ -229,7 +230,12 @@ for epoch in range(1, args.epochs + 1):
         labels    = batch["labels"].to(device)
 
         outputs = model(input_ids=input_ids, labels=labels)
-        loss    = outputs.loss / args.grad_accum   # normalize for gradient accumulation
+        in_final_partial_window = (
+            final_remainder > 0 and
+            batch_idx >= (len(dataloader) - final_remainder)
+        )
+        accumulation_denom = final_remainder if in_final_partial_window else args.grad_accum
+        loss = outputs.loss / accumulation_denom
         loss.backward()
 
         epoch_loss += outputs.loss.item()
