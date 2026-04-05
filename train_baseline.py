@@ -86,6 +86,7 @@ args = parse_args()
 output_dir = resolve_output_dir(args)
 log_path = os.path.join(output_dir, "training_log.txt")
 meta_path = os.path.join(output_dir, "run_metadata.json")
+checkpoint_path = os.path.join(output_dir, "checkpoint_state.pt")
 
 torch.manual_seed(args.seed)
 if torch.cuda.is_available():
@@ -237,6 +238,18 @@ scheduler = get_linear_schedule_with_warmup(
     num_training_steps=total_steps,
 )
 
+start_epoch = 1
+elapsed_before_min = 0.0
+if args.resume and os.path.exists(checkpoint_path):
+    print(f"\nFound checkpoint: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+    start_epoch = int(checkpoint["epoch"]) + 1
+    elapsed_before_min = float(checkpoint.get("elapsed_min", 0.0))
+    print(f"Resuming from epoch {start_epoch}/{args.epochs}")
+
 print(f"\nTraining plan:")
 print(f"  Epochs          : {args.epochs}")
 print(f"  Batches/epoch   : {len(dataloader)}")
@@ -251,8 +264,12 @@ print("=" * 50)
 
 log_lines = ["epoch,step,loss,elapsed_min\n"]
 start_time = time.time()
+skip_training_loop = start_epoch > args.epochs
+if skip_training_loop:
+    print("\nCheckpoint indicates training already completed for requested epochs.")
+    print("Skipping additional epochs and finalizing outputs.")
 
-for epoch in range(1, args.epochs + 1):
+for epoch in range(start_epoch, args.epochs + 1):
     model.train()
     epoch_loss  = 0.0
     step_count  = 0
@@ -288,7 +305,7 @@ for epoch in range(1, args.epochs + 1):
 
     # End-of-epoch logging
     avg_epoch_loss = epoch_loss / step_count
-    elapsed = (time.time() - start_time) / 60
+    elapsed = elapsed_before_min + (time.time() - start_time) / 60
     print(f"\n  Epoch {epoch} complete | avg loss: {avg_epoch_loss:.4f} | elapsed: {elapsed:.1f} min")
     log_lines.append(f"{epoch},{step_count},{avg_epoch_loss:.6f},{elapsed:.2f}\n")
 
@@ -318,7 +335,7 @@ metadata = {
     "total_params": total_params,
     "trainable_params": trainable_params,
     "trainable_pct": trainable_pct,
-    "runtime_min": (time.time() - start_time) / 60,
+    "runtime_min": elapsed_before_min + (time.time() - start_time) / 60,
     "device": str(device),
     "gpu_name": torch.cuda.get_device_name(0) if device.type == "cuda" else None,
     "git_commit": get_git_commit_hash(),
@@ -336,7 +353,7 @@ with open(meta_path, "w", encoding="utf-8") as f:
     json.dump(metadata, f, indent=2)
 
 total_time = (time.time() - start_time) / 60
-print(f"\nTraining complete in {total_time:.1f} minutes.")
+print(f"\nTraining complete in {elapsed_before_min + total_time:.1f} minutes.")
 print(f"Model saved to    : {output_dir}/")
 print(f"Training log      : {log_path}")
 print(f"Run metadata      : {meta_path}")
